@@ -2,14 +2,39 @@
 
 from __future__ import annotations
 
+import re
 from typing import Annotated, Any
 
 from pydantic import Field
 
 from ..client import ZabbixClient
 from ..app import mcp
+from ..errors import ZabbixValidationError
 from ._annotations import DELETE, READ_ONLY, WRITE, WRITE_IDEMPOTENT
 from .item import apply_dependent
+
+
+async def _rule_prototypes(client: ZabbixClient, ruleid: str) -> list[dict[str, Any]]:
+    return await client.call("itemprototype.get", {"output": ["itemid", "key_"], "discoveryids": [ruleid]})
+
+
+async def _check_expression_rule(client: ZabbixClient, ruleid: str, expression: str) -> None:
+    """Fail early if the expression cites no item prototype of the rule.
+
+    triggerprototype.* has no ruleid field: Zabbix infers the rule from the
+    item prototypes used in the expression.
+    """
+    for proto in await _rule_prototypes(client, ruleid):
+        if re.search("/" + re.escape(proto["key_"]) + r"[,)]", expression):
+            return
+    raise ZabbixValidationError(f"expression references no item prototype of LLD rule {ruleid}")
+
+
+async def _check_gitems_rule(client: ZabbixClient, ruleid: str, gitems: list[dict[str, Any]]) -> None:
+    """Same check for graph prototypes, based on the gitems itemids."""
+    ids = {p["itemid"] for p in await _rule_prototypes(client, ruleid)}
+    if not any(str(g.get("itemid")) in ids for g in gitems):
+        raise ZabbixValidationError(f"gitems reference no item prototype of LLD rule {ruleid}")
 
 
 @mcp.tool(
@@ -390,6 +415,8 @@ async def zabbix_lld_item_prototype_update(
     description=(
         "Create a trigger prototype for a Zabbix LLD rule. "
         "The expression must reference item prototypes using LLD macros. "
+        "ruleid is only used to check that the expression cites at least one "
+        "item prototype of that rule; Zabbix infers the rule itself. "
         "Returns the new trigger prototype ID."
     ),
     annotations=WRITE,
@@ -397,7 +424,7 @@ async def zabbix_lld_item_prototype_update(
 async def zabbix_lld_trigger_prototype_create(
     description: Annotated[str, Field(description="Trigger prototype description. May contain LLD macros.")],
     expression: Annotated[str, Field(description="Trigger expression using item prototype keys with LLD macros.")],
-    ruleid: Annotated[str, Field(description="ID of the parent LLD rule.")],
+    ruleid: Annotated[str, Field(description="ID of the parent LLD rule. Used for validation only, not sent to the API.")],
     priority: Annotated[int, Field(description="0=not classified, 1=info, 2=warning, 3=average, 4=high, 5=disaster.", ge=0, le=5)] = 2,
     status: Annotated[int, Field(description="0=enabled (default), 1=disabled.", ge=0, le=1)] = 0,
     tags: Annotated[list[dict[str, Any]] | None, Field(description="Trigger prototype tags.")] = None,
@@ -405,12 +432,12 @@ async def zabbix_lld_trigger_prototype_create(
     url: Annotated[str | None, Field(description="URL associated with this trigger prototype.")] = None,
     recovery_mode: Annotated[int | None, Field(description="0=expression, 1=recovery expression, 2=none.", ge=0, le=2)] = None,
     recovery_expression: Annotated[str | None, Field(description="Recovery expression (required if recovery_mode=1).")] = None,
+    dependencies: Annotated[list[dict[str, Any]] | None, Field(description="Trigger dependencies. Example: [{'triggerid': '123'}].")] = None,
 ) -> dict[str, Any]:
     """Create a trigger prototype for a Zabbix LLD rule."""
     params: dict[str, Any] = {
         "description": description,
         "expression": expression,
-        "ruleid": ruleid,
         "priority": priority,
         "status": status,
     }
@@ -424,13 +451,16 @@ async def zabbix_lld_trigger_prototype_create(
         params["recovery_mode"] = recovery_mode
     if recovery_expression is not None:
         params["recovery_expression"] = recovery_expression
+    if dependencies is not None:
+        params["dependencies"] = dependencies
     async with ZabbixClient() as client:
+        await _check_expression_rule(client, ruleid, expression)
         return await client.call("triggerprototype.create", params)
 
 
 @mcp.tool(
     name="zabbix_lld_trigger_prototype_update",
-    description="Update an existing LLD trigger prototype. Only provided fields are changed. Returns the updated prototype ID.",
+    description="Update an existing LLD trigger prototype. Only provided fields are changed. If ruleid and expression are both given, the expression is checked against that rule's item prototypes. Returns the updated prototype ID.",
     annotations=WRITE_IDEMPOTENT,
 )
 async def zabbix_lld_trigger_prototype_update(
@@ -442,6 +472,7 @@ async def zabbix_lld_trigger_prototype_update(
     tags: Annotated[list[dict[str, Any]] | None, Field(description="Replace tags.")] = None,
     comments: Annotated[str | None, Field(description="New extended description.")] = None,
     url: Annotated[str | None, Field(description="New URL.")] = None,
+    ruleid: Annotated[str | None, Field(description="LLD rule to check against. Not sent to the API, which infers the rule from the item prototypes used.")] = None,
 ) -> dict[str, Any]:
     """Update a Zabbix LLD trigger prototype."""
     params: dict[str, Any] = {"triggerid": triggerid}
@@ -460,6 +491,8 @@ async def zabbix_lld_trigger_prototype_update(
     if url is not None:
         params["url"] = url
     async with ZabbixClient() as client:
+        if ruleid is not None and expression is not None:
+            await _check_expression_rule(client, ruleid, expression)
         return await client.call("triggerprototype.update", params)
 
 
@@ -468,6 +501,7 @@ async def zabbix_lld_trigger_prototype_update(
     description=(
         "Create a graph prototype for a Zabbix LLD rule. "
         "gitems must reference item prototypes. "
+        "If ruleid is given, gitems are checked against that rule's item prototypes. "
         "Returns the new graph prototype ID."
     ),
     annotations=WRITE,
@@ -479,6 +513,7 @@ async def zabbix_lld_graph_prototype_create(
     height: Annotated[int, Field(description="Graph height in pixels.", ge=20)] = 200,
     type: Annotated[int, Field(description="0=normal, 1=stacked, 2=pie, 3=exploded.", ge=0, le=3)] = 0,
     show_legend: Annotated[int, Field(description="1=show legend (default), 0=hide.", ge=0, le=1)] = 1,
+    ruleid: Annotated[str | None, Field(description="LLD rule to check against. Not sent to the API, which infers the rule from the item prototypes used.")] = None,
 ) -> dict[str, Any]:
     """Create a graph prototype for a Zabbix LLD rule."""
     params: dict[str, Any] = {
@@ -490,12 +525,14 @@ async def zabbix_lld_graph_prototype_create(
         "show_legend": show_legend,
     }
     async with ZabbixClient() as client:
+        if ruleid is not None:
+            await _check_gitems_rule(client, ruleid, gitems)
         return await client.call("graphprototype.create", params)
 
 
 @mcp.tool(
     name="zabbix_lld_graph_prototype_update",
-    description="Update an existing LLD graph prototype. Only provided fields are changed. Returns the updated prototype ID.",
+    description="Update an existing LLD graph prototype. Only provided fields are changed. If ruleid and gitems are both given, gitems are checked against that rule's item prototypes. Returns the updated prototype ID.",
     annotations=WRITE_IDEMPOTENT,
 )
 async def zabbix_lld_graph_prototype_update(
@@ -505,6 +542,7 @@ async def zabbix_lld_graph_prototype_update(
     width: Annotated[int | None, Field(description="New width in pixels.", ge=20)] = None,
     height: Annotated[int | None, Field(description="New height in pixels.", ge=20)] = None,
     type: Annotated[int | None, Field(description="New graph type: 0=normal, 1=stacked, 2=pie, 3=exploded.", ge=0, le=3)] = None,
+    ruleid: Annotated[str | None, Field(description="LLD rule to check against. Not sent to the API, which infers the rule from the item prototypes used.")] = None,
 ) -> dict[str, Any]:
     """Update a Zabbix LLD graph prototype."""
     params: dict[str, Any] = {"graphid": graphid}
@@ -519,6 +557,8 @@ async def zabbix_lld_graph_prototype_update(
     if type is not None:
         params["graphtype"] = type
     async with ZabbixClient() as client:
+        if ruleid is not None and gitems is not None:
+            await _check_gitems_rule(client, ruleid, gitems)
         return await client.call("graphprototype.update", params)
 
 

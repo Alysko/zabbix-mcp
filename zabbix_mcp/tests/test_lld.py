@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
+from zabbix_mcp.errors import ZabbixValidationError
 from zabbix_mcp.tools.lld import (
     zabbix_lld_graph_prototype_get,
     zabbix_lld_host_prototype_get,
@@ -320,36 +323,57 @@ class TestZabbixLldItemPrototypeUpdate:
 
 
 class TestZabbixLldTriggerPrototypeCreate:
+    PROTOS = [{"itemid": "300", "key_": "vfs.fs.size[{#FSNAME},pfree]"}]
+    EXPR = "last(/h/vfs.fs.size[{#FSNAME},pfree])<10"
+
+    def _mock(self, result: object = None):
+        mock, ctx = _mock_client("lld", None)
+        mock.call.side_effect = [self.PROTOS, result if result is not None else {}]
+        return mock, ctx
+
     async def test_calls_triggerprototype_create(self, zabbix_env: dict) -> None:
-        mock, ctx = _mock_client("lld", {"triggerids": ["400"]})
+        mock, ctx = self._mock({"triggerids": ["400"]})
         with ctx:
             result = await zabbix_lld_trigger_prototype_create(
-                description="Low disk on {#FSNAME}",
-                expression="last(/h/vfs.fs.size[{#FSNAME},pfree])<10",
-                ruleid="100",
+                description="Low disk on {#FSNAME}", expression=self.EXPR, ruleid="100",
             )
+        assert mock.call.call_args_list[0][0] == ("itemprototype.get", {"output": ["itemid", "key_"], "discoveryids": ["100"]})
         assert mock.call.call_args[0][0] == "triggerprototype.create"
         assert result == {"triggerids": ["400"]}
 
-    async def test_required_params_sent(self, zabbix_env: dict) -> None:
-        mock, ctx = _mock_client("lld", {})
+    async def test_ruleid_not_sent(self, zabbix_env: dict) -> None:
+        mock, ctx = self._mock()
         with ctx:
-            await zabbix_lld_trigger_prototype_create(
-                description="D", expression="E", ruleid="100",
-            )
+            await zabbix_lld_trigger_prototype_create(description="D", expression=self.EXPR, ruleid="100")
         params = mock.call.call_args[0][1]
-        assert params["ruleid"] == "100"
+        assert "ruleid" not in params
         assert params["priority"] == 2
         assert params["status"] == 0
 
     async def test_none_fields_absent(self, zabbix_env: dict) -> None:
-        mock, ctx = _mock_client("lld", {})
+        mock, ctx = self._mock()
         with ctx:
-            await zabbix_lld_trigger_prototype_create(description="D", expression="E", ruleid="100")
+            await zabbix_lld_trigger_prototype_create(description="D", expression=self.EXPR, ruleid="100")
         params = mock.call.call_args[0][1]
         assert "tags" not in params
         assert "comments" not in params
         assert "url" not in params
+        assert "dependencies" not in params
+
+    async def test_dependencies_sent(self, zabbix_env: dict) -> None:
+        mock, ctx = self._mock()
+        deps = [{"triggerid": "12"}]
+        with ctx:
+            await zabbix_lld_trigger_prototype_create(description="D", expression=self.EXPR, ruleid="100", dependencies=deps)
+        assert mock.call.call_args[0][1]["dependencies"] == deps
+
+    async def test_rejects_expression_outside_rule(self, zabbix_env: dict) -> None:
+        mock, ctx = self._mock()
+        with ctx, pytest.raises(ZabbixValidationError, match="LLD rule 100"):
+            await zabbix_lld_trigger_prototype_create(
+                description="D", expression="last(/h/vfs.fs.size[{#FSNAME},used])>0", ruleid="100",
+            )
+        assert mock.call.call_count == 1
 
 
 class TestZabbixLldTriggerPrototypeUpdate:
@@ -393,6 +417,17 @@ class TestZabbixLldGraphPrototypeCreate:
         params = mock.call.call_args[0][1]
         assert params["graphtype"] == 1
         assert "type" not in params
+
+
+    async def test_ruleid_checks_gitems(self, zabbix_env: dict) -> None:
+        mock, ctx = _mock_client("lld", None)
+        mock.call.side_effect = [[{"itemid": "300", "key_": "k"}], {}]
+        with ctx, pytest.raises(ZabbixValidationError, match="LLD rule 100"):
+            await zabbix_lld_graph_prototype_create(name="G", gitems=[{"itemid": "999"}], ruleid="100")
+        mock.call.side_effect = [[{"itemid": "300", "key_": "k"}], {"graphids": ["5"]}]
+        with ctx:
+            assert await zabbix_lld_graph_prototype_create(name="G", gitems=[{"itemid": "300"}], ruleid="100") == {"graphids": ["5"]}
+        assert "ruleid" not in mock.call.call_args[0][1]
 
 
 class TestZabbixLldGraphPrototypeUpdate:
