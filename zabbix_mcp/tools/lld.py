@@ -9,6 +9,7 @@ from pydantic import Field
 from ..client import ZabbixClient
 from ..app import mcp
 from ._annotations import DELETE, READ_ONLY, WRITE, WRITE_IDEMPOTENT
+from .item import apply_dependent
 
 
 @mcp.tool(
@@ -191,6 +192,7 @@ async def zabbix_lld_host_prototype_get(
         "type: 0=Zabbix agent, 2=Zabbix trapper, 3=Simple check, 5=Zabbix internal, "
         "7=Zabbix agent (active), 10=External check, 11=Database monitor, 12=IPMI, "
         "13=SSH, 14=Telnet, 16=JMX, 18=Dependent, 19=HTTP agent, 20=SNMP, 21=Script. "
+        "type=18 requires master_itemid; delay is then forced to '0'. "
         "Returns the new LLD rule ID."
     ),
     annotations=WRITE,
@@ -207,6 +209,10 @@ async def zabbix_lld_rule_create(
     preprocessing: Annotated[list[dict[str, Any]] | None, Field(description="Preprocessing steps.")] = None,
     lld_macro_paths: Annotated[list[dict[str, Any]] | None, Field(description="LLD macro paths.")] = None,
     description: Annotated[str | None, Field(description="Rule description.")] = None,
+    lifetime_type: Annotated[int | None, Field(description="0=delete after lifetime, 1=never delete, 2=delete immediately.", ge=0, le=2)] = None,
+    enabled_lifetime_type: Annotated[int | None, Field(description="0=disable after enabled_lifetime, 1=never disable, 2=disable immediately.", ge=0, le=2)] = None,
+    master_itemid: Annotated[str | None, Field(description="Master item ID. Required when type=18 (dependent).")] = None,
+    extra_params: Annotated[dict[str, Any] | None, Field(description="Extra API fields not exposed here (overrides, etc.). Explicit parameters take precedence.")] = None,
 ) -> dict[str, Any]:
     """Create a Zabbix LLD discovery rule."""
     params: dict[str, Any] = {
@@ -226,13 +232,18 @@ async def zabbix_lld_rule_create(
         params["lld_macro_paths"] = lld_macro_paths
     if description is not None:
         params["description"] = description
+    if lifetime_type is not None:
+        params["lifetime_type"] = lifetime_type
+    if enabled_lifetime_type is not None:
+        params["enabled_lifetime_type"] = enabled_lifetime_type
+    params = apply_dependent(params, master_itemid, extra_params)
     async with ZabbixClient() as client:
         return await client.call("discoveryrule.create", params)
 
 
 @mcp.tool(
     name="zabbix_lld_rule_update",
-    description="Update an existing Zabbix LLD rule. Only provided fields are changed. Returns the updated rule ID.",
+    description="Update an existing Zabbix LLD rule. Only provided fields are changed. master_itemid applies to dependent (type=18) rules. Returns the updated rule ID.",
     annotations=WRITE_IDEMPOTENT,
 )
 async def zabbix_lld_rule_update(
@@ -246,6 +257,8 @@ async def zabbix_lld_rule_update(
     preprocessing: Annotated[list[dict[str, Any]] | None, Field(description="Replace preprocessing steps.")] = None,
     lld_macro_paths: Annotated[list[dict[str, Any]] | None, Field(description="Replace LLD macro paths.")] = None,
     description: Annotated[str | None, Field(description="New description.")] = None,
+    master_itemid: Annotated[str | None, Field(description="Master item ID. Required when type=18 (dependent).")] = None,
+    extra_params: Annotated[dict[str, Any] | None, Field(description="Extra API fields not exposed here (overrides, etc.). Explicit parameters take precedence.")] = None,
 ) -> dict[str, Any]:
     """Update a Zabbix LLD discovery rule."""
     params: dict[str, Any] = {"itemid": itemid}
@@ -267,6 +280,7 @@ async def zabbix_lld_rule_update(
         params["lld_macro_paths"] = lld_macro_paths
     if description is not None:
         params["description"] = description
+    params = apply_dependent(params, master_itemid, extra_params)
     async with ZabbixClient() as client:
         return await client.call("discoveryrule.update", params)
 
@@ -277,6 +291,7 @@ async def zabbix_lld_rule_update(
         "Create an item prototype for a Zabbix LLD rule. "
         "Item prototypes use LLD macros (e.g., {#FSNAME}) in their key and name. "
         "value_type: 0=float, 1=char, 2=log, 3=unsigned int, 4=text. "
+        "type=18 requires master_itemid; delay is then forced to '0'. "
         "Returns the new item prototype ID."
     ),
     annotations=WRITE,
@@ -295,6 +310,8 @@ async def zabbix_lld_item_prototype_create(
     tags: Annotated[list[dict[str, Any]] | None, Field(description="Item prototype tags.")] = None,
     preprocessing: Annotated[list[dict[str, Any]] | None, Field(description="Preprocessing steps.")] = None,
     description: Annotated[str | None, Field(description="Prototype description.")] = None,
+    master_itemid: Annotated[str | None, Field(description="Master item ID. Required when type=18 (dependent).")] = None,
+    extra_params: Annotated[dict[str, Any] | None, Field(description="Extra API fields not exposed here (overrides, etc.). Explicit parameters take precedence.")] = None,
 ) -> dict[str, Any]:
     """Create an item prototype for a Zabbix LLD rule."""
     params: dict[str, Any] = {
@@ -316,13 +333,14 @@ async def zabbix_lld_item_prototype_create(
         params["preprocessing"] = preprocessing
     if description is not None:
         params["description"] = description
+    params = apply_dependent(params, master_itemid, extra_params)
     async with ZabbixClient() as client:
         return await client.call("itemprototype.create", params)
 
 
 @mcp.tool(
     name="zabbix_lld_item_prototype_update",
-    description="Update an existing LLD item prototype. Only provided fields are changed. Returns the updated prototype ID.",
+    description="Update an existing LLD item prototype. Only provided fields are changed. master_itemid applies to dependent (type=18) prototypes. Returns the updated prototype ID.",
     annotations=WRITE_IDEMPOTENT,
 )
 async def zabbix_lld_item_prototype_update(
@@ -337,6 +355,8 @@ async def zabbix_lld_item_prototype_update(
     tags: Annotated[list[dict[str, Any]] | None, Field(description="Replace tags.")] = None,
     preprocessing: Annotated[list[dict[str, Any]] | None, Field(description="Replace preprocessing steps.")] = None,
     description: Annotated[str | None, Field(description="New description.")] = None,
+    master_itemid: Annotated[str | None, Field(description="Master item ID. Required when type=18 (dependent).")] = None,
+    extra_params: Annotated[dict[str, Any] | None, Field(description="Extra API fields not exposed here (overrides, etc.). Explicit parameters take precedence.")] = None,
 ) -> dict[str, Any]:
     """Update a Zabbix LLD item prototype."""
     params: dict[str, Any] = {"itemid": itemid}
@@ -360,6 +380,7 @@ async def zabbix_lld_item_prototype_update(
         params["preprocessing"] = preprocessing
     if description is not None:
         params["description"] = description
+    params = apply_dependent(params, master_itemid, extra_params)
     async with ZabbixClient() as client:
         return await client.call("itemprototype.update", params)
 

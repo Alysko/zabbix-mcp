@@ -5,7 +5,23 @@ from typing import Annotated, Any
 from pydantic import Field
 from ..client import ZabbixClient
 from ..app import mcp
+from ..errors import ZabbixValidationError
 from ._annotations import DELETE, READ_ONLY, WRITE, WRITE_IDEMPOTENT
+
+
+def apply_dependent(params: dict[str, Any], master_itemid: str | None, extra_params: dict[str, Any] | None) -> dict[str, Any]:
+    """Add master_itemid and extra_params, and enforce type 18 rules.
+
+    Explicit fields win over extra_params. A dependent item must have a master
+    and no polling interval, so delay is forced to "0".
+    """
+    if master_itemid is not None: params["master_itemid"] = master_itemid
+    if extra_params: params = {**extra_params, **params}
+    if params.get("type") == 18:
+        if not params.get("master_itemid"):
+            raise ZabbixValidationError("type=18 (dependent) requires master_itemid")
+        params["delay"] = "0"
+    return params
 
 
 @mcp.tool(name="zabbix_item_get", description="List Zabbix items (metrics). Filter by host, group, template, item key, or name.", annotations=READ_ONLY)
@@ -34,7 +50,7 @@ async def zabbix_item_get(
         return await client.call("item.get", params)
 
 
-@mcp.tool(name="zabbix_item_create", description="Create a new Zabbix item on a host. type: 0=agent, 2=trapper, 7=external, 14=active agent, 17=calculated, 18=dependent, 19=HTTP, 20=SNMP. value_type: 0=float, 1=char, 2=log, 3=unsigned int, 4=text.", annotations=WRITE)
+@mcp.tool(name="zabbix_item_create", description="Create a new Zabbix item on a host. type: 0=agent, 2=trapper, 7=external, 14=active agent, 17=calculated, 18=dependent, 19=HTTP, 20=SNMP. value_type: 0=float, 1=char, 2=log, 3=unsigned int, 4=text. type=18 requires master_itemid; delay is then forced to '0'.", annotations=WRITE)
 async def zabbix_item_create(
     hostid: Annotated[str, Field(description="ID of the host.")],
     name: Annotated[str, Field(description="Item name.")],
@@ -49,6 +65,8 @@ async def zabbix_item_create(
     tags: Annotated[list[dict[str, Any]] | None, Field(description="Item tags.")]=None,
     status: Annotated[int, Field(description="0=enabled, 1=disabled.", ge=0, le=1)]=0,
     description: Annotated[str | None, Field(description="Description.")]=None,
+    master_itemid: Annotated[str | None, Field(description="Master item ID. Required when type=18 (dependent).")]=None,
+    extra_params: Annotated[dict[str, Any] | None, Field(description="Extra API fields not exposed here. Explicit parameters take precedence.")]=None,
 ) -> dict[str, Any]:
     params: dict[str, Any] = {"hostid": hostid, "name": name, "key_": key_, "type": type, "value_type": value_type, "status": status}
     if interfaceid is not None: params["interfaceid"] = interfaceid
@@ -58,11 +76,12 @@ async def zabbix_item_create(
     if units is not None: params["units"] = units
     if tags is not None: params["tags"] = tags
     if description is not None: params["description"] = description
+    params = apply_dependent(params, master_itemid, extra_params)
     async with ZabbixClient() as client:
         return await client.call("item.create", params)
 
 
-@mcp.tool(name="zabbix_item_update", description="Update an existing Zabbix item. Only provided fields are changed.", annotations=WRITE_IDEMPOTENT)
+@mcp.tool(name="zabbix_item_update", description="Update an existing Zabbix item. Only provided fields are changed. Switching to type=18 (dependent) requires master_itemid; delay is then forced to '0'.", annotations=WRITE_IDEMPOTENT)
 async def zabbix_item_update(
     itemid: Annotated[str, Field(description="ID of the item to update.")],
     name: Annotated[str | None, Field(description="New name.")]=None,
@@ -76,6 +95,8 @@ async def zabbix_item_update(
     status: Annotated[int | None, Field(description="0=enabled, 1=disabled.", ge=0, le=1)]=None,
     tags: Annotated[list[dict[str, Any]] | None, Field(description="Replace tags.")]=None,
     description: Annotated[str | None, Field(description="New description.")]=None,
+    master_itemid: Annotated[str | None, Field(description="Master item ID. Required when type=18 (dependent).")]=None,
+    extra_params: Annotated[dict[str, Any] | None, Field(description="Extra API fields not exposed here. Explicit parameters take precedence.")]=None,
 ) -> dict[str, Any]:
     params: dict[str, Any] = {"itemid": itemid}
     if name is not None: params["name"] = name
@@ -89,6 +110,7 @@ async def zabbix_item_update(
     if status is not None: params["status"] = status
     if tags is not None: params["tags"] = tags
     if description is not None: params["description"] = description
+    params = apply_dependent(params, master_itemid, extra_params)
     async with ZabbixClient() as client:
         return await client.call("item.update", params)
 
