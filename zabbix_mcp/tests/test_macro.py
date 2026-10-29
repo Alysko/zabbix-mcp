@@ -30,11 +30,20 @@ class TestZabbixUsermacroGet:
             await zabbix_usermacro_get()
         assert mock.call.call_args[0][0] == "usermacro.get"
 
-    async def test_default_globalmacro_false(self, zabbix_env: dict) -> None:
+    async def test_default_globalmacro_not_sent(self, zabbix_env: dict) -> None:
+        # globalmacro is an API flag: sending it as false still returns global macros.
         mock, ctx = _mock_client([])
         with ctx:
             await zabbix_usermacro_get()
-        assert mock.call.call_args[0][1]["globalmacro"] is False
+        assert "globalmacro" not in mock.call.call_args[0][1]
+
+    async def test_globalmacro_false_with_hostids_not_sent(self, zabbix_env: dict) -> None:
+        mock, ctx = _mock_client([])
+        with ctx:
+            await zabbix_usermacro_get(hostids=["10572"], globalmacro=False)
+        params = mock.call.call_args[0][1]
+        assert "globalmacro" not in params
+        assert params["hostids"] == ["10572"]
 
     async def test_globalmacro_true(self, zabbix_env: dict) -> None:
         mock, ctx = _mock_client([])

@@ -35,8 +35,11 @@ async def zabbix_usermacro_get(
     params: dict[str, Any] = {
         "output": output,
         "limit": limit,
-        "globalmacro": globalmacro,
     }
+    # globalmacro is a Zabbix API "flag": any value it is passed with, false
+    # included, turns it on. Send it only when the caller asks for global macros.
+    if globalmacro:
+        params["globalmacro"] = True
     if hostmacroids is not None:
         params["hostmacroids"] = hostmacroids
     if hostids is not None:
