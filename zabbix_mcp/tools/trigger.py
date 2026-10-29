@@ -32,7 +32,8 @@ async def zabbix_trigger_get(
     if value is not None: filter_["value"] = value
     if priority is not None: filter_["priority"] = priority
     if filter_: params["filter"] = filter_
-    if only_true is not None: params["only_true"] = 1 if only_true else 0
+    # Zabbix API flag: passed with any value (0 included) it is on, so send it only when true.
+    if only_true: params["only_true"] = True
     if name is not None: params["search"] = {"description": name}
     async with ZabbixClient() as client:
         return await client.call("trigger.get", params)

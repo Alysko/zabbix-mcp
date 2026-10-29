@@ -71,14 +71,15 @@ class TestZabbixHostgroupGet:
         with ctx:
             await zabbix_hostgroup_get(real_hosts=True)
         params = mock.call.call_args[0][1]
-        assert params["real_hosts"] == 1
+        assert params["real_hosts"] is True
 
-    async def test_real_hosts_false(self, zabbix_env: dict) -> None:
+    async def test_real_hosts_false_not_sent(self, zabbix_env: dict) -> None:
+        # real_hosts is an API flag: sending it as 0 would still enable it.
         mock, ctx = _mock_client([])
         with ctx:
             await zabbix_hostgroup_get(real_hosts=False)
         params = mock.call.call_args[0][1]
-        assert params["real_hosts"] == 0
+        assert "real_hosts" not in params
 
     async def test_real_hosts_none_not_in_params(self, zabbix_env: dict) -> None:
         mock, ctx = _mock_client([])

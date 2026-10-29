@@ -23,7 +23,8 @@ async def zabbix_hostgroup_get(
     if hostids is not None: params["hostids"] = hostids
     if templateids is not None: params["templateids"] = templateids
     if name is not None: params["search"] = {"name": name}
-    if real_hosts is not None: params["real_hosts"] = 1 if real_hosts else 0
+    # Zabbix API flag: passed with any value (0 included) it is on, so send it only when true.
+    if real_hosts: params["real_hosts"] = True
     async with ZabbixClient() as client:
         return await client.call("hostgroup.get", params)
 

@@ -106,7 +106,15 @@ class TestZabbixTriggerGet:
         with ctx:
             await zabbix_trigger_get(only_true=True)
         params = mock.call.call_args[0][1]
-        assert params["only_true"] == 1
+        assert params["only_true"] is True
+
+    async def test_only_true_false_not_sent(self, zabbix_env: dict) -> None:
+        # only_true is an API flag: sending it as 0 would still enable it.
+        mock, ctx = _mock_client([])
+        with ctx:
+            await zabbix_trigger_get(only_true=False)
+        params = mock.call.call_args[0][1]
+        assert "only_true" not in params
 
     async def test_search_by_name(self, zabbix_env: dict) -> None:
         mock, ctx = _mock_client([])
