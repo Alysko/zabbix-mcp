@@ -214,52 +214,109 @@ class TestZabbixHostUpdate:
         assert "status" not in params
 
 
+def _mock_client_seq(*returns: object):
+    """Mock client whose successive .call() invocations return the given values."""
+    mock = AsyncMock()
+    mock.call = AsyncMock(side_effect=list(returns))
+    cm = AsyncMock()
+    cm.__aenter__ = AsyncMock(return_value=mock)
+    cm.__aexit__ = AsyncMock(return_value=None)
+    return mock, patch("zabbix_mcp.tools.host.ZabbixClient", return_value=cm)
+
+
+_AGENT_IF = {
+    "interfaceid": "5", "hostid": "10", "type": "1", "main": "1", "useip": "1",
+    "ip": "192.168.1.1", "dns": "", "port": "10050", "details": [],
+    "available": "1", "error": "", "errors_from": "0", "disable_until": "0",
+}
+_SNMP_IF = {
+    "interfaceid": "6", "hostid": "10", "type": "2", "main": "1", "useip": "1",
+    "ip": "192.168.1.1", "dns": "", "port": "161",
+    "details": {"version": "3", "bulk": "1", "securityname": "zbx"},
+    "available": "1", "error": "", "errors_from": "0", "disable_until": "0",
+}
+_READ_ONLY = ("available", "error", "errors_from", "disable_until", "hostid")
+
+
 class TestZabbixHostInterfaceCreate:
-    async def test_calls_hostinterface_create(self, zabbix_env: dict) -> None:
-        mock, ctx = _mock_client({"interfaceids": ["5"]})
+    async def test_uses_host_update_not_hostinterface_create(self, zabbix_env: dict) -> None:
+        new_if = {**_AGENT_IF, "interfaceid": "7", "main": "0", "ip": "1.2.3.4"}
+        mock, ctx = _mock_client_seq(
+            [{"hostid": "10", "interfaces": [_AGENT_IF]}],
+            {"hostids": ["10"]},
+            [{"hostid": "10", "interfaces": [_AGENT_IF, new_if]}],
+        )
         with ctx:
             result = await zabbix_host_interface_create(
-                hostid="10", type=1, main=1, useip=1,
-                ip="192.168.1.1", dns="", port="10050",
+                hostid="10", type=1, main=0, useip=1, ip="1.2.3.4", dns="", port="10050",
             )
-        assert mock.call.call_args[0][0] == "hostinterface.create"
-        assert result == {"interfaceids": ["5"]}
+        methods = [c.args[0] for c in mock.call.call_args_list]
+        assert methods == ["host.get", "host.update", "host.get"]
+        assert "hostinterface.create" not in methods
+        assert result == {"interfaceids": ["7"]}
 
-    async def test_required_params_sent(self, zabbix_env: dict) -> None:
-        mock, ctx = _mock_client({})
+    async def test_existing_interfaces_kept_with_ids(self, zabbix_env: dict) -> None:
+        mock, ctx = _mock_client_seq(
+            [{"hostid": "10", "interfaces": [_AGENT_IF, _SNMP_IF]}],
+            {"hostids": ["10"]},
+            [{"hostid": "10", "interfaces": [_AGENT_IF, _SNMP_IF]}],
+        )
         with ctx:
             await zabbix_host_interface_create(
-                hostid="10", type=1, main=1, useip=1, ip="1.2.3.4", dns="", port="10050",
+                hostid="10", type=1, main=0, useip=1, ip="1.2.3.4", dns="", port="10050",
             )
-        params = mock.call.call_args[0][1]
+        params = mock.call.call_args_list[1].args[1]
         assert params["hostid"] == "10"
-        assert params["type"] == 1
-        assert params["ip"] == "1.2.3.4"
-        assert params["port"] == "10050"
+        ifaces = params["interfaces"]
+        assert [i.get("interfaceid") for i in ifaces] == ["5", "6", None]
+        assert ifaces[2]["ip"] == "1.2.3.4"
+        for iface in ifaces:
+            for field in _READ_ONLY:
+                assert field not in iface
+        assert "details" not in ifaces[0]          # agent interface: no details
+        assert ifaces[1]["details"] == _SNMP_IF["details"]
+
+    async def test_unknown_host_raises(self, zabbix_env: dict) -> None:
+        from zabbix_mcp.errors import ZabbixNotFoundError
+        mock, ctx = _mock_client_seq([])
+        with ctx, pytest.raises(ZabbixNotFoundError):
+            await zabbix_host_interface_create(
+                hostid="999", type=1, main=1, useip=1, ip="1.2.3.4", dns="", port="10050",
+            )
+        assert mock.call.call_count == 1
 
 
 class TestZabbixHostInterfaceUpdate:
-    async def test_calls_hostinterface_update(self, zabbix_env: dict) -> None:
-        mock, ctx = _mock_client({"interfaceids": ["5"]})
+    async def test_uses_host_update_with_merged_change(self, zabbix_env: dict) -> None:
+        mock, ctx = _mock_client_seq(
+            [{"interfaceid": "6", "hostid": "10"}],
+            [{"hostid": "10", "interfaces": [_AGENT_IF, _SNMP_IF]}],
+            {"hostids": ["10"]},
+        )
         with ctx:
-            result = await zabbix_host_interface_update(interfaceid="5", port="161")
-        assert mock.call.call_args[0][0] == "hostinterface.update"
+            result = await zabbix_host_interface_update(interfaceid="6", port="1161")
+        methods = [c.args[0] for c in mock.call.call_args_list]
+        assert methods == ["hostinterface.get", "host.get", "host.update"]
+        ifaces = mock.call.call_args_list[2].args[1]["interfaces"]
+        by_id = {i["interfaceid"]: i for i in ifaces}
+        assert by_id["6"]["port"] == "1161"
+        assert by_id["5"]["port"] == "10050"   # other interface untouched
+        assert result == {"interfaceids": ["6"]}
+
+    async def test_no_change_does_not_write(self, zabbix_env: dict) -> None:
+        mock, ctx = _mock_client_seq([{"interfaceid": "5", "hostid": "10"}])
+        with ctx:
+            result = await zabbix_host_interface_update(interfaceid="5")
+        methods = [c.args[0] for c in mock.call.call_args_list]
+        assert methods == ["hostinterface.get"]
         assert result == {"interfaceids": ["5"]}
 
-    async def test_sends_interfaceid(self, zabbix_env: dict) -> None:
-        mock, ctx = _mock_client({})
-        with ctx:
-            await zabbix_host_interface_update(interfaceid="99")
-        assert mock.call.call_args[0][1]["interfaceid"] == "99"
-
-    async def test_none_fields_absent(self, zabbix_env: dict) -> None:
-        mock, ctx = _mock_client({})
-        with ctx:
-            await zabbix_host_interface_update(interfaceid="1")
-        params = mock.call.call_args[0][1]
-        assert "ip" not in params
-        assert "port" not in params
-        assert "dns" not in params
+    async def test_unknown_interface_raises(self, zabbix_env: dict) -> None:
+        from zabbix_mcp.errors import ZabbixNotFoundError
+        mock, ctx = _mock_client_seq([])
+        with ctx, pytest.raises(ZabbixNotFoundError):
+            await zabbix_host_interface_update(interfaceid="99", port="1")
+        assert mock.call.call_count == 1
 
 
 from zabbix_mcp.tools.host import zabbix_host_delete, zabbix_host_interface_delete  # noqa: E402
@@ -285,15 +342,53 @@ class TestZabbixHostDelete:
 
 
 class TestZabbixHostInterfaceDelete:
-    async def test_calls_hostinterface_delete(self, zabbix_env: dict) -> None:
-        mock, ctx = _mock_client({"interfaceids": ["3"]})
+    async def test_uses_host_update_without_deleted_interface(self, zabbix_env: dict) -> None:
+        mock, ctx = _mock_client_seq(
+            [{"interfaceid": "6", "hostid": "10"}],
+            [{"hostid": "10", "interfaces": [_AGENT_IF, _SNMP_IF]}],
+            {"hostids": ["10"]},
+        )
         with ctx:
-            result = await zabbix_host_interface_delete(interfaceids=["3"])
-        assert mock.call.call_args[0][0] == "hostinterface.delete"
-        assert result == {"interfaceids": ["3"]}
+            result = await zabbix_host_interface_delete(interfaceids=["6"])
+        methods = [c.args[0] for c in mock.call.call_args_list]
+        assert methods == ["hostinterface.get", "host.get", "host.update"]
+        assert "hostinterface.delete" not in methods
+        ifaces = mock.call.call_args_list[2].args[1]["interfaces"]
+        assert [i["interfaceid"] for i in ifaces] == ["5"]
+        assert result == {"interfaceids": ["6"]}
 
-    async def test_passes_ids_as_positional(self, zabbix_env: dict) -> None:
-        mock, ctx = _mock_client({})
+    async def test_multiple_hosts(self, zabbix_env: dict) -> None:
+        other = {**_AGENT_IF, "interfaceid": "8", "hostid": "11"}
+        other_keep = {**_AGENT_IF, "interfaceid": "9", "hostid": "11", "main": "0"}
+        mock, ctx = _mock_client_seq(
+            [{"interfaceid": "6", "hostid": "10"}, {"interfaceid": "9", "hostid": "11"}],
+            [{"hostid": "10", "interfaces": [_AGENT_IF, _SNMP_IF]}],
+            {"hostids": ["10"]},
+            [{"hostid": "11", "interfaces": [other, other_keep]}],
+            {"hostids": ["11"]},
+        )
         with ctx:
-            await zabbix_host_interface_delete(interfaceids=["3"])
-        assert mock.call.call_args[0][1] == ["3"]
+            await zabbix_host_interface_delete(interfaceids=["6", "9"])
+        updates = [c.args[1] for c in mock.call.call_args_list if c.args[0] == "host.update"]
+        assert [(u["hostid"], [i["interfaceid"] for i in u["interfaces"]]) for u in updates] == [
+            ("10", ["5"]),
+            ("11", ["8"]),
+        ]
+
+    async def test_unknown_interface_raises_before_any_write(self, zabbix_env: dict) -> None:
+        from zabbix_mcp.errors import ZabbixNotFoundError
+        mock, ctx = _mock_client_seq([{"interfaceid": "6", "hostid": "10"}])
+        with ctx, pytest.raises(ZabbixNotFoundError):
+            await zabbix_host_interface_delete(interfaceids=["6", "404"])
+        assert mock.call.call_count == 1
+
+    async def test_api_error_propagates(self, zabbix_env: dict) -> None:
+        """Interface still used by items: Zabbix refuses host.update, error must surface."""
+        from zabbix_mcp.errors import ZabbixAPIError
+        mock, ctx = _mock_client_seq(
+            [{"interfaceid": "6", "hostid": "10"}],
+            [{"hostid": "10", "interfaces": [_AGENT_IF, _SNMP_IF]}],
+            ZabbixAPIError("Interface is linked to item"),
+        )
+        with ctx, pytest.raises(ZabbixAPIError):
+            await zabbix_host_interface_delete(interfaceids=["6"])

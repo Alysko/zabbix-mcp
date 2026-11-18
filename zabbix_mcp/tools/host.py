@@ -8,7 +8,48 @@ from pydantic import Field
 
 from ..client import ZabbixClient
 from ..app import mcp
+from ..errors import ZabbixNotFoundError
 from ._annotations import DELETE, READ_ONLY, WRITE, WRITE_IDEMPOTENT
+
+
+# Zabbix 8.0 removed hostinterface.create/update/delete (and massadd/massremove).
+# Interfaces are managed through host.update with the full "interfaces" array,
+# which works the same way on Zabbix 7.4 and 8.0. hostinterface.get still exists.
+# host.update replaces the whole set: any interface missing from the array is deleted,
+# so we always read the current set first and send it back complete.
+_IFACE_WRITABLE = ("interfaceid", "type", "main", "useip", "ip", "dns", "port")
+_SNMP_TYPE = "2"
+
+
+def _clean_iface(iface: dict[str, Any]) -> dict[str, Any]:
+    """Keep only writable interface fields; details only for SNMP interfaces."""
+    out = {k: iface[k] for k in _IFACE_WRITABLE if k in iface}
+    if str(iface.get("type")) == _SNMP_TYPE and iface.get("details"):
+        out["details"] = iface["details"]
+    return out
+
+
+async def _host_ifaces(client: ZabbixClient, hostid: str) -> list[dict[str, Any]]:
+    res = await client.call(
+        "host.get",
+        {"hostids": [hostid], "output": ["hostid"], "selectInterfaces": "extend"},
+    )
+    if not res:
+        raise ZabbixNotFoundError(f"Resource not found: host {hostid} does not exist.")
+    return [_clean_iface(i) for i in res[0].get("interfaces", [])]
+
+
+async def _owners_of(client: ZabbixClient, interfaceids: list[str]) -> dict[str, str]:
+    """Map interfaceid -> hostid. Raise if any interface is unknown."""
+    res = await client.call(
+        "hostinterface.get",
+        {"interfaceids": interfaceids, "output": ["interfaceid", "hostid"]},
+    )
+    found = {r["interfaceid"]: r["hostid"] for r in res}
+    missing = sorted(set(interfaceids) - found.keys())
+    if missing:
+        raise ZabbixNotFoundError(f"Resource not found: interfaces {missing} do not exist.")
+    return found
 
 
 @mcp.tool(
@@ -130,10 +171,14 @@ async def zabbix_host_interface_create(
     port: Annotated[str, Field(description="Port. Example: '10050'.")],
     details: Annotated[dict[str, Any] | None, Field(description="SNMP details.")] = None,
 ) -> dict[str, Any]:
-    params: dict[str, Any] = {"hostid": hostid, "type": type, "main": main, "useip": useip, "ip": ip, "dns": dns, "port": port}
-    if details is not None: params["details"] = details
+    new: dict[str, Any] = {"type": type, "main": main, "useip": useip, "ip": ip, "dns": dns, "port": port}
+    if details is not None: new["details"] = details
     async with ZabbixClient() as client:
-        return await client.call("hostinterface.create", params)
+        current = await _host_ifaces(client, hostid)
+        await client.call("host.update", {"hostid": hostid, "interfaces": current + [new]})
+        known = {i["interfaceid"] for i in current}
+        after = await _host_ifaces(client, hostid)
+        return {"interfaceids": [i["interfaceid"] for i in after if i["interfaceid"] not in known]}
 
 
 @mcp.tool(name="zabbix_host_interface_update", description="Update an existing Zabbix host interface.", annotations=WRITE_IDEMPOTENT)
@@ -146,15 +191,23 @@ async def zabbix_host_interface_update(
     useip: Annotated[int | None, Field(description="1=IP, 0=DNS.", ge=0, le=1)] = None,
     details: Annotated[dict[str, Any] | None, Field(description="Updated SNMP details.")] = None,
 ) -> dict[str, Any]:
-    params: dict[str, Any] = {"interfaceid": interfaceid}
-    if ip is not None: params["ip"] = ip
-    if dns is not None: params["dns"] = dns
-    if port is not None: params["port"] = port
-    if main is not None: params["main"] = main
-    if useip is not None: params["useip"] = useip
-    if details is not None: params["details"] = details
+    changes: dict[str, Any] = {}
+    if ip is not None: changes["ip"] = ip
+    if dns is not None: changes["dns"] = dns
+    if port is not None: changes["port"] = port
+    if main is not None: changes["main"] = main
+    if useip is not None: changes["useip"] = useip
+    if details is not None: changes["details"] = details
     async with ZabbixClient() as client:
-        return await client.call("hostinterface.update", params)
+        hostid = (await _owners_of(client, [interfaceid]))[interfaceid]
+        if not changes:
+            return {"interfaceids": [interfaceid]}
+        ifaces = await _host_ifaces(client, hostid)
+        for iface in ifaces:
+            if iface["interfaceid"] == interfaceid:
+                iface.update(changes)
+        await client.call("host.update", {"hostid": hostid, "interfaces": ifaces})
+        return {"interfaceids": [interfaceid]}
 
 
 @mcp.tool(name="zabbix_host_delete", description="⚠️ DESTRUCTIVE — Permanently delete Zabbix hosts and all their items, triggers, graphs, and history. Cannot be undone.", annotations=DELETE)
@@ -166,4 +219,9 @@ async def zabbix_host_delete(hostids: Annotated[list[str], Field(description="ID
 @mcp.tool(name="zabbix_host_interface_delete", description="⚠️ DESTRUCTIVE — Permanently delete host interfaces. Cannot be undone.", annotations=DELETE)
 async def zabbix_host_interface_delete(interfaceids: Annotated[list[str], Field(description="IDs of interfaces to delete.")]) -> dict[str, Any]:
     async with ZabbixClient() as client:
-        return await client.call("hostinterface.delete", interfaceids)
+        owners = await _owners_of(client, interfaceids)
+        for hostid in sorted(set(owners.values())):
+            ifaces = await _host_ifaces(client, hostid)
+            keep = [i for i in ifaces if i["interfaceid"] not in owners]
+            await client.call("host.update", {"hostid": hostid, "interfaces": keep})
+        return {"interfaceids": interfaceids}
