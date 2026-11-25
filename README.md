@@ -218,7 +218,7 @@ zabbix_mcp/
 
 ## Zabbix API compatibility
 
-Targets **Zabbix 7.4**. Uses JSON-RPC 2.0 via [`zabbix-utils`](https://github.com/zabbix/python-zabbix-utils).
+Targets **Zabbix 7.4 & 8.0**. Uses JSON-RPC 2.0 via [`zabbix-utils`](https://github.com/zabbix/python-zabbix-utils).
 
 The deprecated `host.massupdate`, `host.massadd`, and `host.massremove` methods are intentionally not implemented (scheduled for removal in a future Zabbix version).
 
