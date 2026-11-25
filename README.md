@@ -7,7 +7,7 @@
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-A complete [MCP](https://modelcontextprotocol.io/) server for **Zabbix 7.4**, enabling any MCP-compatible AI assistant to interact with your Zabbix infrastructure using natural language.
+A complete [MCP](https://modelcontextprotocol.io/) server for **Zabbix 7.4 & 8.0**, enabling any MCP-compatible AI assistant to interact with your Zabbix infrastructure using natural language.
 
 ## Features
 
@@ -25,7 +25,7 @@ A complete [MCP](https://modelcontextprotocol.io/) server for **Zabbix 7.4**, en
 
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/getting-started/installation/)
-- A Zabbix 7.4 instance with API access
+- A Zabbix 7.4 or 8.0 instance with API access
 - A Zabbix API token (*User settings > API tokens > Create token*)
 - An MCP-compatible client (e.g. [Claude Desktop](https://claude.ai/download), [Cursor](https://www.cursor.com/), [Continue](https://www.continue.dev/))
 
